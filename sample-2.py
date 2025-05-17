@@ -1,0 +1,102 @@
+from dataloader import SELFIEVocab, RegExVocab, CharVocab
+from model import RNN
+import argparse
+import torch
+import yaml
+import selfies as sf
+from tqdm import tqdm
+from rdkit import Chem
+
+from rdkit import rdBase
+rdBase.DisableLog('rdApp.error')
+
+def get_args():
+    parser = argparse.ArgumentParser("python")
+    parser.add_argument("-result_dir",
+                        required=False,
+                        default="",
+                        help="directory of result files including configuration, \
+                         loss, trained model, and sampled molecules"
+                        )
+    parser.add_argument("-batch_size",
+                        required=False,
+                        default=512,
+                        help="number of samples to generate per mini-batch"
+                        )
+    parser.add_argument("-num_batches",
+                        required=False,
+                        default=2,
+                        help="number of batches to generate"
+                        )
+    return parser.parse_args()
+
+if __name__ == "__main__":
+    args = get_args()
+    result_dir = args.result_dir
+    batch_size = int(args.batch_size)
+    num_batches = int(args.num_batches)
+
+    config_dir = result_dir + "train.yaml"
+    with open(config_dir, 'r') as f:
+        config = yaml.full_load(f)
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print('device: ', device)
+
+    which_vocab, vocab_path = config["which_vocab"], config["vocab_path"]
+
+    if which_vocab == "selfies":
+        vocab = SELFIEVocab(vocab_path)
+    elif which_vocab == "regex":
+        vocab = RegExVocab(vocab_path)
+    elif which_vocab == "char":
+        vocab = CharVocab(vocab_path)
+    else:
+        raise ValueError("Wrong vacab name for configuration which_vocab!")
+
+    rnn_config = config['rnn_config']
+    model = RNN(rnn_config).to(device)
+    model.load_state_dict(torch.load(
+        config['out_dir'] + 'v2-reinforced-epoch10.pt',
+        map_location=torch.device(device)))
+    model.eval()
+
+    out_file = open(result_dir + "sampled_molecules-v7.out", "w")
+    num_valid, num_invalid = 0, 0
+    for _ in tqdm(range(num_batches)):
+
+        sampled_ints = model.sample(
+            batch_size=batch_size,
+            vocab=vocab,
+            device=device
+        )
+
+        molecules = []
+        sampled_ints = sampled_ints.tolist()
+        for ints in sampled_ints:
+            molecule = []
+            for x in ints:
+                if vocab.int2tocken[x] == '<eos>':
+                    break
+                else:
+                    molecule.append(vocab.int2tocken[x])
+            molecules.append("".join(molecule))
+
+        if vocab.name == 'selfies':
+            molecules = [sf.decoder(x) for x in molecules]
+
+        for smiles in molecules:
+            try:
+                mol = Chem.MolFromSmiles(smiles)
+                if mol is None:
+                    num_invalid += 1
+                else:
+                    num_valid += 1
+                    out_file.write(smiles + '\n')
+            except:
+                num_valid += 1
+                pass
+
+    print("sampled {} valid SMILES out of {}, success rate: {}".format(
+        num_valid, num_valid + num_invalid, num_valid / (num_valid + num_invalid))
+    )
